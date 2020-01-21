@@ -5,197 +5,215 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/mux"
-	"gopkg.in/olivere/elastic.v6"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"log"
 	"net/http"
 )
 
 type User struct {
-	Name         string `json:"name"`
-	Location     string `json:"location"`
-	LocationType string `json:"location_type"`
+	ID           primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
+	Name         string             `json:"name" bson:"name"`
+	Location     string             `json:"location" bson:"location"`
+	LocationType string             `json:"location_type" bson:"location_type"`
 }
 
-const indexName string = "massive-profiling"
+var (
+	client     *mongo.Client
+	collection *mongo.Collection
+	uri        = "mongodb+srv://dbAdmin:dbAdminPassword@cluster0-cjr4r.gcp.mongodb.net/test"
+	ctx        = context.Background()
+)
 
-func restAPI() {
-	r := mux.NewRouter()
-	s := r.PathPrefix("/products").Subrouter()
+func initMongo() (client *mongo.Client) {
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
 
-	s.HandleFunc("/", getAllData).Methods("GET")
-
-	fmt.Printf("API started...\n\n")
-	_ = http.ListenAndServe(":8000", s)
-}
-
-func initElastic() *elastic.Client {
-	client, err := elastic.NewClient(elastic.SetURL("http://192.168.114.111:9200"))
 	if err != nil {
-		panic(err)
+		fmt.Println("Connection failed!")
+		log.Fatal(err)
+	} else {
+		fmt.Println("Connected to MongoDB!")
 	}
 
 	return client
 }
 
-func printResult(result *elastic.SearchResult, name string) {
-	rawMsg := result.Aggregations[name]
-	var ar elastic.AggregationBucketKeyItems
-	err := json.Unmarshal(*rawMsg, &ar)
+func restAPI() {
+	r := mux.NewRouter()
+	s := r.PathPrefix("/api/v1").Subrouter()
 
-	if err != nil {
-		fmt.Printf("Unmarshal failed: %v\n", err)
-		return
-	}
+	s.HandleFunc("/data", getPeople).Methods("GET")
+	s.HandleFunc("/data/{id}", getPerson).Methods("GET")
+	s.HandleFunc("/data", createPerson).Methods("POST")
+	s.HandleFunc("/data/{id}", updatePerson).Methods("PUT")
+	s.HandleFunc("/data/{id}", deletePerson).Methods("DELETE")
 
-	for _, item := range ar.Buckets {
-		fmt.Printf("[+] %v: %v\n", item.Key, item.DocCount)
-	}
+	fmt.Printf("API started...\n\n")
+	_ = http.ListenAndServe(":8000", s)
 }
 
-func searchWithQuery(post User) map[string]interface{} {
-	client := initElastic()
-
-	genderAggr := elastic.NewTermsAggregation().Field("gender.keyword")
-	ageAggr := elastic.NewTermsAggregation().Field("age_range.keyword")
-
-	var location string
-	location = "location_default." + post.LocationType
-
-	termName := elastic.NewWildcardQuery("name", post.Name)
-	termLoc := elastic.NewWildcardQuery(location, post.Location)
-	termAll := elastic.NewBoolQuery().Must(termName).Must(termLoc)
-
-	searchResult, err := client.Search().
-		Aggregation("genders", genderAggr).
-		Aggregation("age_ranges", ageAggr).
-		Index(indexName).
-		Query(termAll).
-		From(0).Size(10).
-		Do(context.Background())
-
-	if err != nil {
-		fmt.Printf("Search failed: %v\n", err)
-	}
-
-	// Print result in IDE
-	fmt.Println("Broken down by gender:")
-	printResult(searchResult, "genders")
-	fmt.Println("\nBroken down by age range:")
-	printResult(searchResult, "age_ranges")
-	fmt.Printf("\nTotal hits: %v\n", searchResult.Hits.TotalHits)
-
-	// Print result in JSON
-	gendersData := make(map[string]interface{})
-	genders, found := searchResult.Aggregations.Terms("genders")
-	if found {
-		for _, b := range genders.Buckets {
-			str1 := fmt.Sprintf("%v", b.Key)
-			str2 := fmt.Sprintf("%v", b.DocCount)
-			gendersData[str1] = str2
-		}
-	}
-	ageRangesData := make(map[string]interface{})
-	age_ranges, found := searchResult.Aggregations.Terms("age_ranges")
-	if found {
-		for _, b := range age_ranges.Buckets {
-			str1 := fmt.Sprintf("%v", b.Key)
-			str2 := fmt.Sprintf("%v", b.DocCount)
-			ageRangesData[str1] = str2
-		}
-	}
-
-	data := make(map[string]interface{})
-	data["gender"] = gendersData
-	data["age_range"] = ageRangesData
-
+func getAllMongoData(person []User) map[string]interface{} {
 	response := make(map[string]interface{})
-	response["data"] = data
+	if person == nil {
+		response["data"] = nil
+	} else {
+		response["data"] = person
+	}
 	response["message"] = "success"
 	response["status"] = true
-
 	return response
 }
 
-func searchNoQuery() map[string]interface{} {
-	client := initElastic()
-
-	genderAggr := elastic.NewTermsAggregation().Field("gender.keyword")
-	ageAggr := elastic.NewTermsAggregation().Field("age_range.keyword")
-
-	searchResult, err := client.Search().
-		Aggregation("genders", genderAggr).
-		Aggregation("age_ranges", ageAggr).
-		Index(indexName).
-		From(0).Size(20).
-		Do(context.Background())
-
-	if err != nil {
-		fmt.Printf("Search failed: %v\n", err)
-	}
-
-	// Print result in IDE
-	fmt.Println("Broken down by gender:")
-	printResult(searchResult, "genders")
-	fmt.Println("\nBroken down by age range:")
-	printResult(searchResult, "age_ranges")
-	fmt.Printf("\nTotal hits: %v\n", searchResult.Hits.TotalHits)
-
-	// Print result in JSON
-	gendersData := make(map[string]interface{})
-	genders, found := searchResult.Aggregations.Terms("genders")
-	if found {
-		for _, b := range genders.Buckets {
-			str1 := fmt.Sprintf("%v", b.Key)
-			str2 := fmt.Sprintf("%v", b.DocCount)
-			gendersData[str1] = str2
-		}
-	}
-	ageRangesData := make(map[string]interface{})
-	age_ranges, found := searchResult.Aggregations.Terms("age_ranges")
-	if found {
-		for _, b := range age_ranges.Buckets {
-			str1 := fmt.Sprintf("%v", b.Key)
-			str2 := fmt.Sprintf("%v", b.DocCount)
-			ageRangesData[str1] = str2
-		}
-	}
-
-	data := make(map[string]interface{})
-	data["gender"] = gendersData
-	data["age_range"] = ageRangesData
+func getMongoData(id primitive.ObjectID) map[string]interface{} {
+	var person User
+	err := collection.FindOne(ctx, bson.M{"_id": bson.M{"$eq": id}}).Decode(&person)
 
 	response := make(map[string]interface{})
-	response["data"] = data
+	if err != nil {
+		response["data"] = nil
+	} else {
+		response["data"] = person
+	}
 	response["message"] = "success"
 	response["status"] = true
-
 	return response
 }
 
-func getAllData(w http.ResponseWriter, r *http.Request) {
+func createMongoData(person User) map[string]interface{} {
+	result, err := collection.InsertOne(ctx, person)
+	id := result.InsertedID
+
+	response := make(map[string]interface{})
+	if err != nil {
+		response["data"] = nil
+		response["message"] = "failed"
+		response["status"] = false
+	} else {
+		response["data"] = id
+		response["message"] = "success"
+		response["status"] = true
+	}
+	return response
+}
+
+func updateMongoData(id primitive.ObjectID, update User) map[string]interface{} {
+	_, err := collection.UpdateOne(ctx, bson.M{"_id": bson.M{"$eq": id}}, bson.M{"$set": update})
+
+	response := make(map[string]interface{})
+	if err != nil {
+		response["data"] = nil
+		response["message"] = "failed"
+		response["status"] = false
+	} else {
+		response["data"] = update
+		response["message"] = "updated"
+		response["status"] = true
+	}
+	return response
+}
+
+func deleteMongoData(id primitive.ObjectID) map[string]interface{} {
+	_, err := collection.DeleteOne(ctx, bson.M{"_id": bson.M{"$eq": id}})
+
+	response := make(map[string]interface{})
+	if err != nil {
+		response["data"] = nil
+		response["message"] = "failed"
+		response["status"] = false
+	} else {
+		response["data"] = id
+		response["message"] = "deleted"
+		response["status"] = true
+	}
+	return response
+}
+
+func getPeople(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	var post User
-	_ = json.NewDecoder(r.Body).Decode(&post)
+	var people []User
+	cursor, _ := collection.Find(ctx, bson.M{})
+	defer cursor.Close(ctx)
 
-	if post.Name != "" && post.Location != "" && post.LocationType != "" {
-		_ = json.NewEncoder(w).Encode(searchWithQuery(post))
-	} else {
-		_ = json.NewEncoder(w).Encode(searchNoQuery())
+	for cursor.Next(ctx) {
+		var person User
+		_ = cursor.Decode(&person)
+		people = append(people, person)
 	}
+
+	if err := cursor.Err(); err != nil {
+		log.Fatal(err)
+	}
+
+	_ = json.NewEncoder(w).Encode(getAllMongoData(people))
+}
+
+func getPerson(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	params := mux.Vars(r)
+	id, _ := primitive.ObjectIDFromHex(params["id"])
+
+	_ = json.NewEncoder(w).Encode(getMongoData(id))
+}
+
+func createPerson(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var person User
+	_ = json.NewDecoder(r.Body).Decode(&person)
+	_ = json.NewEncoder(w).Encode(createMongoData(person))
+}
+
+func updatePerson(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var (
+		person User
+		update User
+	)
+
+	params := mux.Vars(r)
+	id, _ := primitive.ObjectIDFromHex(params["id"])
+
+	// Get data from mongo
+	err := collection.FindOne(ctx, bson.M{"_id": bson.M{"$eq": id}}).Decode(&person)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Update data with data body json
+	_ = json.NewDecoder(r.Body).Decode(&update)
+	update.ID = person.ID
+	if update.Name == "" {
+		update.Name = person.Name
+	}
+	if update.Location == "" {
+		update.Location = person.Location
+	}
+	if update.LocationType == "" {
+		update.LocationType = person.LocationType
+	}
+
+	_ = json.NewEncoder(w).Encode(updateMongoData(id, update))
+}
+
+func deletePerson(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	params := mux.Vars(r)
+	id, _ := primitive.ObjectIDFromHex(params["id"])
+
+	_ = json.NewEncoder(w).Encode(deleteMongoData(id))
 }
 
 func main() {
-	client := initElastic()
+	// Start MongoDB connection
+	client = initMongo()
+	collection = client.Database("mongo_crud").Collection("people")
 
-	// Check index is already exist or not
-	exists, err := client.IndexExists(indexName).Do(context.Background())
-	if err != nil {
-		panic(err)
-	}
-	if exists {
-		fmt.Println("Index 'massive-profiling' is found")
-	}
-
-	// API Connection
+	// Start API Connection
 	restAPI()
 }
